@@ -4,7 +4,7 @@ You are running a **cron** scheduled task that produces a daily CI health report
 
 ## Goal
 
-Check the pass/fail history (last completed builds over 7 days per job) for all ROSA CI periodic jobs across all categories defined in the job registry. Report per-category pass rates, 7-day trends, and failure classifications. If all categories are >= 80%, respond with a brief summary and `no_action_required()`.
+Check the pass/fail history (last completed builds over 7 days per job) for all ROSA CI periodic jobs across all categories defined in the job registry. Report per-category pass rates, 7-day trends, and failure classifications. If all categories are >= 80%, respond with a brief summary and `no_action_required()`. After reporting, write a YAML handoff artifact to the bot's fork for the remediation task.
 
 ## Procedure
 
@@ -17,7 +17,7 @@ Use `fetch_web_content` to retrieve this YAML file. It defines all jobs organize
 
 If the fetch fails, report the error and skip the health check. Do not use a hardcoded fallback (it goes stale and causes incorrect "no runs" reports).
 
-**Procedure adherence:** Follow steps 1→2→3→4→5→6→7 sequentially. Do not use broad CI analysis tools as a shortcut for steps 1-3. The job registry is the authoritative source for which jobs to check and how to categorize them.
+**Procedure adherence:** Follow steps 1→2→3→4→5→6 sequentially. Do not use broad CI analysis tools as a shortcut for steps 1-3. The job registry is the authoritative source for which jobs to check and how to categorize them.
 
 ### 2. Collect build history
 
@@ -55,7 +55,7 @@ Post a concise summary as your channel response. This is the top-level message t
 
 **If all categories >= 80%**: respond with a single line like:
 `:large_green_circle: *ROSA CI Daily Health -- {DATE}:* all {N} categories passing (overall {rate}%)`
-Then call `no_action_required()`.
+Then proceed to step 6 (write handoff artifact), then call `no_action_required()`.
 
 **If any category < 80%**: use this format:
 
@@ -78,7 +78,7 @@ _{N} categories skipped (no runs) · <https://sippy.dptools.openshift.org/sippy-
 - Append a small `(<prow_filter_url|jobs>)` link at the end of each category line using the `prow_filter` URL from ci-status-jobs.yaml. This lets readers click through to the Prow job-history for that category.
 - Do NOT repeat category details in a separate section below the list.
 
-**Threading gate:** Before proceeding, check: does your summary contain any :red_circle: or :large_yellow_circle: categories? If yes, step 5 is **mandatory** — do not call `send_response()` until threaded replies are composed. If all categories are :large_green_circle:, skip to `no_action_required()`.
+**Threading gate:** Before proceeding, check: does your summary contain any :red_circle: or :large_yellow_circle: categories? If yes, step 5 is **mandatory** — do not call `send_response()` until threaded replies are composed. If all categories are :large_green_circle:, skip to step 6.
 
 ### 5. Failure analysis (threaded replies)
 
@@ -137,93 +137,62 @@ These are patterns that come up often. Use them as hints, not a rigid checklist.
 - Boskos lease timeout: `failed to acquire lease`, all quota slices in use
 - Prometheus alert flakes: transient alerts firing on fresh clusters
 
-### 6. Auto-fix (for pattern-matched failures)
+### 6. Write handoff artifact
 
-After completing the failure analysis, check if any failures match fixable patterns. Add a `---THREAD_BREAK---` section to post the results as another threaded reply.
+After completing steps 4-5 and calling `send_response()`, write a YAML handoff artifact for the remediation task. This step runs even if all categories are green (the remediation task uses the artifact for PR shepherding of previously opened PRs).
 
-**Conformance skip list pattern:**
-If a conformance test (HCP or Classic STS) is failing persistently (3+ consecutive failures) and the failing test is in an OCP-owned sig (sig-apps, sig-auth, sig-network, sig-storage), AND the same test is NOT failing in rosa-e2e HCP/STS jobs (confirming it's upstream, not ROSA-specific):
+**Artifact location:** Push to the bot's fork of `openshift-online/rosa-e2e` at path `.chai-bot/reports/daily_health_latest.yaml`.
 
-1. Search for existing open PRs in `openshift/release` with `[ci-fix]` in the title targeting the same test. If found, skip and note the existing PR.
-2. Clone `openshift/release` via workspace tools
-3. Add the test name to the `TEST_SKIPS` env var in the appropriate workflow YAML:
-   - HCP: `ci-operator/step-registry/rosa/aws/hcp/conformance/rosa-aws-hcp-conformance-workflow.yaml`
-   - Classic STS: `ci-operator/step-registry/rosa/aws/sts/conformance/rosa-aws-sts-conformance-workflow.yaml`
-4. Run `make jobs` to regenerate Prow job configs
-5. Scan the diff for sensitive content (credentials, IP addresses, account IDs) before pushing
-6. Open a PR with title `[ci-fix] Skip <test-name> in <workflow> (upstream OCP regression)`
-7. PR description must link to the failing Prow job run(s) and reference the upstream OCP bug if identifiable
-8. Add a `---THREAD_BREAK---` section to post a threaded reply with the PR link
+**Steps:**
+1. Call `priv_scm_ensure_fork("github.com", "openshift-online/rosa-e2e")` to ensure the bot's fork exists and get the fork repo path.
+2. Call `get_current_thread_url()` to capture the thread reference (channel_id, thread_ts) of the posted health report.
+3. Compose the YAML artifact (schema below).
+4. Use a workspace to clone the fork, write the file, commit, and push to the fork's default branch.
 
-**PR shepherding:**
-After opening a PR (or if a `[ci-fix]` PR is already open from a previous run), shepherd it through CI:
+**YAML schema:**
 
-1. Check the PR's CI status. If checks are still running, note it and move on.
-2. If CI failed, investigate the failure:
-   - For `ci/prow/lint` or `ci/prow/images`: check if the failure is related to the fix or pre-existing on main
-   - For rehearsals: wait for `[REHEARSALNOTIFIER]` comment, then run representative rehearsals via `/pj-rehearse <job-name>` (job names come from the rehearsal-notifier comment). Only `/pj-rehearse ack` after rehearsals pass. Never `auto-ack` or `skip`.
-   - If the CI failure is caused by the fix itself, attempt to correct it, push an update, and note in the thread.
-   - If the CI failure is pre-existing and unrelated, note it in the thread and proceed.
-3. Check for review comments from CodeRabbit (`coderabbitai`) or human reviewers. If there are unresolved comments, read them and attempt to address them (push code fixes, respond to questions, or explain the rationale for the change). Mark resolved comments as addressed.
-4. If all CI checks pass and no unresolved review comments remain, post a threaded reply: "CI is green, reviews addressed, ready for `/lgtm` and `/approve`"
-5. For `openshift/release` PRs: remind that `/retest <job>` omits the `ci/prow/` prefix
+```yaml
+report_date: "2026-07-25"
+generated_at: "2026-07-25T14:45:00Z"
+thread_reference:
+  channel_id: "C0ADGRNAT8U"
+  thread_ts: "1784990442.709069"
+overall_pass_rate: 66
+job_registry_url: "https://raw.githubusercontent.com/openshift-online/rosa-e2e/main/configs/ci-status-jobs.yaml"
+categories:
+  - id: "rosa-hcp-e2e"
+    name: "ROSA HCP E2E"
+    pass_rate: 85
+    trend: "stable"
+    health: "green"
+    jobs:
+      - name: "HCP Day1 Validation"
+        prow_job: "periodic-ci-openshift-online-rosa-e2e-master-..."
+        pass_count: 6
+        fail_count: 1
+        total: 7
+        pass_rate: 86
+        last_failure_url: "https://prow.ci.openshift.org/view/gs/..."
+        last_failure_date: "2026-07-23"
+        failure_classification: "VPC cleanup timeout"
+        consecutive_failures: 0
+        team:
+          id: "97412673-7d28-430b-bdee-ce3d1eb702b2"
+          name: "ROSA CI"
+          slack_channel: "#rosa-ci"
+          slack_alias: "@rosa-ci-team"
+        labels:
+          - "ci-failure"
+          - "rosa-hcp"
+```
 
-The goal is that by the time a human looks at the PR, the only action needed is `/lgtm` and `/approve`.
-
-**Stale PR cleanup:**
-Before creating new PRs, check for any open `[ci-fix]` PRs older than 7 days. Auto-close them with a comment explaining they were not reviewed in time.
-
-**Constraints:**
-- Maximum 3 auto-fix PRs per scheduled run
-- Allowed repos for fixes: `openshift/release` (step registry, workflow YAMLs), `openshift-online/rosa-e2e` (test code), `service/ocm-backend-tests` (FVT test code on GitLab), `openshift/origin` (conformance test fixes)
-- Never modify production configs or operator code
-- PRs require human `/lgtm` and `/approve` before merge (no auto-merge)
-
-### 7. Jira ticket creation (for non-fixable failures)
-
-For persistent failures (3+ consecutive) where the auto-fix step did not open a PR (the failure requires deeper investigation or a fix outside the allowed repos), create a Jira ticket so the owning team can investigate.
-
-Before creating a ticket, search Jira for existing open issues that already cover the same failure (search by job name or test name in ROSAENG and SREP projects). If found, skip and note the existing ticket.
-
-**Team and label classification:**
-
-The `ci-status-jobs.yaml` config includes `team` and `labels` fields per category (and optionally per job). Use these directly:
-- `team.id` maps to the Jira Team field (`customfield_10001`)
-- `team.name` is for display only
-- `team.slack_channel` is the team's Slack channel for notifications
-- `team.slack_alias` is the team's Slack user group handle (e.g., `@sd-srep-team-hulk`)
-- `labels` is the list of Jira labels to apply
-- Job-level `team` and `labels` override category-level when present
-
-If a category or job has no `team` field, fall back to ROSA CI (`97412673-7d28-430b-bdee-ce3d1eb702b2`) with label `ci-failure`.
-
-**Team notifications:** When creating a Jira ticket, also post a notification to the team's `slack_channel` (if defined) mentioning the `slack_alias` (if defined). Keep the notification brief: link to the Jira ticket and a one-line summary of the failure.
-
-For OCM FVT failures, also check cs-telemetry to determine if the failure is CS-side (API errors, timeouts) vs test-side (assertion errors, framework issues). If test-side, use ROSA CI team instead of the category's team.
-
-**Ticket format:**
-- Type: Bug
-- Summary: `[ci-failure] <Job display name>: <brief failure description>`
-- Priority: Major (persistent) or Minor (intermittent)
-- Parent epic: choose the most relevant open epic under these ROSA initiatives based on the failure type:
-  - [ROSA-727](https://redhat.atlassian.net/browse/ROSA-727) (Canonical E2E Test Suite and Signals):
-    - Search child epics of ROSA-727 for the best match based on the failure type, category, and component
-  - [ROSA-714](https://redhat.atlassian.net/browse/ROSA-714) (SRE Operator Production Compliance):
-    - SRE operator failures: search for an open epic matching the operator
-  - [ROSA-798](https://redhat.atlassian.net/browse/ROSA-798) (OCM UI, ROSA CLI, and Terraform CI):
-    - ROSA CLI E2E failures (rosa-cli-jobs): search for an open epic under ROSA-798
-    - Terraform provider failures (terraform-provider-rhcs-jobs): search for an open epic under ROSA-798
-  - If unsure, use ROSAENG-391 as the fallback
-- Labels: from the `labels` field in ci-status-jobs.yaml
-- Description: include the diagnosis from the threaded reply, links to failing Prow runs, and any cs-telemetry findings
-- Security Level: Red Hat Employee (id: 10034)
-
-**Constraints:**
-- Maximum 2 Jira tickets per scheduled run
-- Only create tickets for persistent failures (3+ consecutive), not intermittent flakes
-- Always search for existing open tickets first to avoid duplicates
-
-Add a `---THREAD_BREAK---` section to post a threaded reply noting the created ticket with a link.
+**Field notes:**
+- `thread_reference`: actual channel_id and thread_ts from the posted summary. The remediation task uses this to post threaded replies to the same thread.
+- Include **ALL** categories and **ALL** jobs, not just failing ones. The remediation task needs the full picture.
+- `consecutive_failures`: count of consecutive recent failed builds (0 if the latest passed).
+- `failure_classification`: short label from your analysis (e.g., "conformance skip list", "STS account-roles crash", "Boskos lease timeout"). Empty string if the job is passing.
+- `team` and `labels`: from the job registry (`ci-status-jobs.yaml`). Include them verbatim. If a job overrides the category-level team/labels, use the job-level values.
+- If a job had a fetch error in step 2, set `pass_count` and `fail_count` to -1 and `failure_classification` to "fetch_error".
 
 ## Constraints
 
@@ -231,4 +200,5 @@ Add a `---THREAD_BREAK---` section to post a threaded reply noting the created t
 - Never add sections, headers, or bullet lists below the category lines. The only thing after the last category line is the footer.
 - If more than half the jobs return no data, warn about possible Prow/GCS issues at the top.
 - Before sending: if any category is below 80%, verify your response content contains `---THREAD_DETAILS---` followed by at least one threaded reply section. If these delimiters are missing, your threaded replies will not be posted — go back to step 5.
+- Always write the handoff artifact (step 6) after posting, even if all categories are green.
 
