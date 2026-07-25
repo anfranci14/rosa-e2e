@@ -55,7 +55,7 @@ Post a concise summary as your channel response. This is the top-level message t
 
 **If all categories >= 80%**: respond with a single line like:
 `:large_green_circle: *ROSA CI Daily Health -- {DATE}:* all {N} categories passing (overall {rate}%)`
-Then proceed to step 6 (write handoff artifact), then call `no_action_required()`.
+Then call `send_response()` to deliver the summary, proceed to step 6 (write handoff artifact), then call `no_action_required()`.
 
 **If any category < 80%**: use this format:
 
@@ -78,7 +78,7 @@ _{N} categories skipped (no runs) · <https://sippy.dptools.openshift.org/sippy-
 - Append a small `(<prow_filter_url|jobs>)` link at the end of each category line using the `prow_filter` URL from ci-status-jobs.yaml. This lets readers click through to the Prow job-history for that category.
 - Do NOT repeat category details in a separate section below the list.
 
-**Threading gate:** Before proceeding, check: does your summary contain any :red_circle: or :large_yellow_circle: categories? If yes, step 5 is **mandatory** — do not call `send_response()` until threaded replies are composed. If all categories are :large_green_circle:, skip to step 6.
+**Threading gate:** Before proceeding, check: does your summary contain any :red_circle: or :large_yellow_circle: categories? If yes, step 5 is **mandatory** — do not call `send_response()` until threaded replies are composed. If all categories are :large_green_circle:, call `send_response()` then skip to step 6.
 
 ### 5. Failure analysis (threaded replies)
 
@@ -139,7 +139,7 @@ These are patterns that come up often. Use them as hints, not a rigid checklist.
 
 ### 6. Write handoff artifact
 
-After completing steps 4-5 and calling `send_response()`, write a YAML handoff artifact for the remediation task. This step runs even if all categories are green (the remediation task uses the artifact for PR shepherding of previously opened PRs).
+After calling `send_response()` (whether or not step 5 ran), write a YAML handoff artifact for the remediation task. This step runs even if all categories are green (the remediation task uses the artifact for PR shepherding of previously opened PRs).
 
 **Artifact location:** Push to the bot's fork of `openshift-online/rosa-e2e` at path `.chai-bot/reports/daily_health_latest.yaml`.
 
@@ -148,6 +148,7 @@ After completing steps 4-5 and calling `send_response()`, write a YAML handoff a
 2. Call `get_current_thread_url()` to capture the thread reference (channel_id, thread_ts) of the posted health report.
 3. Compose the YAML artifact (schema below).
 4. Use a workspace to clone the fork, write the file, commit, and push to the fork's default branch.
+5. Verify the push succeeded. If cloning, committing, or pushing fails, post a warning in the thread: ":warning: Handoff artifact write failed — remediation task will not run today." Do NOT call `no_action_required()` without a successful push — the artifact is required for the remediation task.
 
 **YAML schema:**
 
@@ -176,6 +177,10 @@ categories:
         last_failure_date: "2026-07-23"
         failure_classification: "VPC cleanup timeout"
         consecutive_failures: 0
+        failing_tests:
+          - "[sig-apps] Deployment should run the lifecycle of a Deployment"
+        failure_summary: "Conformance test failure in sig-apps Deployment lifecycle test"
+        diagnosis: "Test fails on OCP 4.18 nightly, upstream regression. Not ROSA-specific."
         team:
           id: "97412673-7d28-430b-bdee-ce3d1eb702b2"
           name: "ROSA CI"
@@ -191,6 +196,9 @@ categories:
 - Include **ALL** categories and **ALL** jobs, not just failing ones. The remediation task needs the full picture.
 - `consecutive_failures`: count of consecutive recent failed builds (0 if the latest passed).
 - `failure_classification`: short label from your analysis (e.g., "conformance skip list", "STS account-roles crash", "Boskos lease timeout"). Empty string if the job is passing.
+- `failing_tests`: list of specific test names or step names that are failing. Empty list if the job is passing. The remediation task uses these to create skip-list PRs and accurate Jira ticket descriptions.
+- `failure_summary`: one-line human-readable summary of the failure diagnosis from step 5. Empty string if the job is passing.
+- `diagnosis`: structured diagnostic evidence including error messages, cs-telemetry findings, or log excerpts. Empty string if the job is passing.
 - `team` and `labels`: from the job registry (`ci-status-jobs.yaml`). Include them verbatim. If a job overrides the category-level team/labels, use the job-level values.
 - If a job had a fetch error in step 2, set `pass_count` and `fail_count` to -1 and `failure_classification` to "fetch_error".
 

@@ -21,6 +21,8 @@ Read the YAML handoff artifact from the bot's fork of `openshift-online/rosa-e2e
 
 If the artifact is missing or unreadable, report the error and call `no_action_required()`.
 
+**Schema validation:** After parsing, validate the artifact has all required fields before taking any action. Required: `thread_reference` (with `channel_id` and `thread_ts`), `report_date`, `categories` (non-empty list). For each job entry, require: `prow_job`, `pass_count`, `fail_count`, `consecutive_failures` (must be numeric). If the artifact is malformed, partially populated, or missing required fields, treat it the same as missing — report the error and call `no_action_required()`.
+
 ### 2. Connect to health report thread
 
 All output from this task must be posted as threaded replies to the original health report message. Use the `thread_reference` from the artifact:
@@ -57,10 +59,10 @@ If a conformance test (HCP or Classic STS) is failing persistently (3+ consecuti
 
 ### 4. PR shepherding
 
-After handling new auto-fixes, shepherd ALL open `[ci-fix]` PRs — both newly created and previously opened ones. Search for open PRs with `[ci-fix]` in the title across the allowed repos.
+After handling new auto-fixes, shepherd open `[ci-fix]` PRs — both newly created and previously opened ones. Search for open PRs with `[ci-fix]` in the title across the allowed repos. Process at most **10 PRs per run** (prioritize newly created PRs first, then oldest existing PRs). If more than 10 open `[ci-fix]` PRs exist, note the overflow count in the summary reply.
 
 **Stale PR cleanup (first):**
-Before shepherding, check for any open `[ci-fix]` PRs older than 7 days. Auto-close them with a comment explaining they were not reviewed in time.
+Before shepherding, check for any open `[ci-fix]` PRs older than 7 days. Only auto-close a PR if ALL of: (a) the PR was opened by the bot, (b) there has been no human comment, review, or CI activity in the last 3 days, and (c) the PR does not have a pending `/lgtm` or `/approve`. Close qualifying stale PRs with a comment explaining they were not reviewed in time. Preserve PRs that have recent human engagement — they may be awaiting review.
 
 **CI status checks:**
 1. Check each PR's CI status.
