@@ -4,7 +4,7 @@ You are running a **cron** scheduled task that produces a daily CI health report
 
 ## Goal
 
-Check the pass/fail history (last completed builds over 7 days per job) for all ROSA CI periodic jobs across all categories defined in the job registry. Report per-category pass rates, 7-day trends, and failure classifications. If all categories are >= 80%, respond with a brief summary and `no_action_required()`. After reporting, write a YAML handoff artifact to the bot's fork and chain remediation follow-ups in the same thread.
+Check the pass/fail history (last completed builds over 7 days per job) for all ROSA CI periodic jobs across all categories defined in the job registry. Report per-category pass rates, 7-day trends, and failure classifications. If all categories are >= 80%, respond with a brief summary and `no_action_required()`. After reporting, write a YAML handoff artifact to the bot's fork. When failures are present (any category < 80%), chain remediation follow-ups in the same thread; on all-green reports, the artifact is written but no remediation follow-up is scheduled.
 
 ## Procedure
 
@@ -148,6 +148,7 @@ These are patterns that come up often. Use them as hints, not a rigid checklist.
 2. Compose the YAML artifact (schema below).
 3. Use a workspace to clone the fork, write the file, commit, and push to the fork's default branch.
 4. Verify the push succeeded. If cloning, committing, or pushing fails, include a warning in the top-level response delivered by step 7: ":warning: Handoff artifact write failed — remediation will not run today." Do NOT call `no_action_required()` without a successful push — the artifact is required for the remediation follow-ups.
+5. After a successful push, capture the commit SHA (e.g., from `git rev-parse HEAD`). Store the SHA — it will be embedded in the follow-up description so the remediation reads the artifact at this exact commit, avoiding race conditions if a concurrent run overwrites `daily_health_latest.yaml` during the follow-up delay.
 
 **YAML schema:**
 
@@ -195,7 +196,7 @@ categories:
 - `failure_summary`: one-line human-readable summary of the failure diagnosis from step 5. Empty string if the job is passing.
 - `diagnosis`: structured diagnostic evidence including error messages, cs-telemetry findings, or log excerpts. Empty string if the job is passing.
 - `team` and `labels`: from the job registry (`ci-status-jobs.yaml`). Include them verbatim. If a job overrides the category-level team/labels, use the job-level values.
-- If a job had a fetch error in step 2, set `pass_count` and `fail_count` to -1 and `failure_classification` to "fetch_error".
+- If a job had a fetch error in step 2, set `pass_count` and `fail_count` to -1, `total` to 0, `pass_rate` to -1, `consecutive_failures` to 0, and `failure_classification` to "fetch_error". This signals that no valid data was retrieved — remediation follow-ups must skip these jobs entirely (they are not real failures).
 
 ### 7. Deliver response and schedule remediation follow-up
 
@@ -205,17 +206,17 @@ categories:
 
    **All-green path** (every category >= 80%): Write the handoff artifact (step 6) and call `send_response()`. Do **not** schedule a remediation follow-up — there is nothing to remediate. The artifact is still written so PR shepherding can happen if triggered manually.
 
-   **Failures present** (any category < 80%): After `send_response()`, schedule the follow-up with this description (replace `<fork_repo>` with the actual fork repo path from step 6.1):
+   **Failures present** (any category < 80%): After `send_response()`, schedule the follow-up with this description (replace `<fork_repo>` with the actual fork repo path from step 6.1 and `<commit_sha>` with the commit SHA from step 6.5):
 
    > PR Remediation follow-up. You are continuing the daily health report thread with automated remediation.
    >
    > 1. Call `priv_scm_ensure_fork("github.com", "openshift-online/rosa-e2e")` to resolve the fork path.
-   > 2. Read the handoff artifact using `github_file_content(repo="<fork_repo>", path=".chai-bot/reports/daily_health_latest.yaml")`. Parse the YAML. Verify `report_date` is today — if stale, call `no_action_required()`.
+   > 2. Read the handoff artifact using `github_file_content(repo="<fork_repo>", path=".chai-bot/reports/daily_health_latest.yaml", ref="<commit_sha>")`. Parse the YAML. Verify `report_date` is today — if stale, call `no_action_required()`.
    > 3. Read the remediation instructions using `github_file_content(repo="openshift-online/rosa-e2e", path=".chai-bot/rosa_ci_daily_remediation.md")`. Follow the **"## PR Remediation"** section (auto-fix PRs and PR shepherding).
-   > 4. Compose a summary of all PR actions taken (PRs opened, shepherded, closed) and post it using `send_response()`.
-   > 5. After `send_response()`, call `schedule_followup` with a 2-minute delay for Jira remediation with this description:
-   >    "Jira Remediation follow-up. You are continuing the daily health report thread with Jira ticket creation for persistent failures. (1) Call priv_scm_ensure_fork to resolve the fork. (2) Read the handoff artifact from <fork_repo> at .chai-bot/reports/daily_health_latest.yaml. Verify report_date is today. (3) Read the remediation instructions from openshift-online/rosa-e2e at .chai-bot/rosa_ci_daily_remediation.md. Follow the '## Jira Remediation' section. (4) Compose a summary of Jira actions taken and post it using send_response(). If no Jira actions are needed, call no_action_required()."
-   > 6. If no PR actions are needed (no fixable failures, no open PRs to shepherd), still schedule the Jira follow-up (persistent failures may need tickets even if no PRs are warranted), then call `no_action_required()`.
+   > 4. **Action branch** (PRs were opened, shepherded, or closed): Compose a summary of all PR actions taken and post it using `send_response()`. After `send_response()`, call `schedule_followup` with a 2-minute delay for Jira remediation (use the description in step 6).
+   > 5. **No-action branch** (no fixable failures, no open PRs to shepherd): Schedule the Jira follow-up directly (persistent failures may still need tickets even if no PRs are warranted), then call `no_action_required()`. Do NOT post an empty summary via `send_response()`.
+   > 6. Jira follow-up description (used by both branches):
+   >    "Jira Remediation follow-up. You are continuing the daily health report thread with Jira ticket creation for persistent failures. (1) Call priv_scm_ensure_fork to resolve the fork. (2) Read the handoff artifact from <fork_repo> at .chai-bot/reports/daily_health_latest.yaml using ref=<commit_sha>. Verify report_date is today. (3) Read the remediation instructions from openshift-online/rosa-e2e at .chai-bot/rosa_ci_daily_remediation.md. Follow the '## Jira Remediation' section. (4) Compose a summary of Jira actions taken and post it using send_response(). If no Jira actions are needed, call no_action_required()."
 
 ## Constraints
 

@@ -12,6 +12,8 @@ This section covers automated PR fixes for pattern-matched failures and shepherd
 
 Scan the artifact for failures that match fixable patterns. Prioritize by severity (lowest pass rate first, highest consecutive failures first).
 
+**Skip fetch_error jobs:** Jobs with `failure_classification` of `"fetch_error"` represent data retrieval failures, not real test failures. Skip these entirely — do not open PRs or count them as failures.
+
 **Conformance skip list pattern:**
 
 If a conformance test (HCP or Classic STS) is failing persistently (3+ consecutive failures) and the failing test is in an OCP-owned sig (sig-apps, sig-auth, sig-network, sig-storage), AND the same test is NOT failing in rosa-e2e HCP/STS jobs (confirming it's upstream, not ROSA-specific):
@@ -88,7 +90,9 @@ After completing auto-fix PRs and PR shepherding, compose a summary of all PR ac
 - Addressed: {N} comments across {M} PRs
 ```
 
-Post this summary using `send_response()`. If no PR actions were taken (no fixable failures, no open PRs to shepherd), skip the summary but still schedule the Jira follow-up if there are persistent failures that may need tickets.
+**Action branch** (PRs were opened, shepherded, or closed): Post this summary using `send_response()`, then schedule the Jira follow-up via `schedule_followup`.
+
+**No-action branch** (no fixable failures, no open PRs to shepherd): Do NOT post an empty summary. Schedule the Jira follow-up directly via `schedule_followup`, then call `no_action_required()`.
 
 ---
 
@@ -99,6 +103,8 @@ This section covers Jira ticket creation for persistent non-fixable failures.
 ### Jira ticket creation (for non-fixable failures)
 
 For persistent failures (3+ consecutive) where auto-fix PRs were not opened (the failure requires deeper investigation or a fix outside the allowed repos), create a Jira ticket so the owning team can investigate.
+
+**Skip fetch_error jobs:** Jobs with `failure_classification` of `"fetch_error"` represent data retrieval failures, not real test failures. Skip these entirely — do not create Jira tickets for them.
 
 Before creating a ticket, search Jira for existing open issues that already cover the same failure (search by job name or test name in ROSAENG and SREP projects). If found, skip and note the existing ticket.
 
