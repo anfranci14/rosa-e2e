@@ -1,49 +1,14 @@
-# Scheduled task: ROSA CI daily remediation
+# ROSA CI daily remediation — reference instructions
 
-You are running a **cron** scheduled task that remediates CI failures identified by the daily health report. You read a handoff artifact, then take automated actions: opening fix PRs, shepherding existing PRs through CI and code review, and filing Jira tickets for persistent failures. All output is posted as threaded replies to the original health report thread.
+> **This file is NOT a standalone cron task.** It is triggered via `schedule_followup` chaining from the daily health report (`rosa_ci_daily_health_report.md`). The health report posts its summary, then schedules a PR remediation follow-up, which in turn schedules a Jira remediation follow-up. All follow-ups fire in the same thread as the health report — threading is automatic.
+>
+> The follow-up description tells you which section to execute and how to read the handoff artifact. You do not need to resolve threading or read the artifact independently — that context is provided in the follow-up prompt.
 
-## Goal
+## PR Remediation
 
-Read the handoff artifact from the daily health report. For fixable failures, open PRs. For existing open PRs, shepherd them through CI checks, CodeRabbitAI reviews, and human review. For persistent non-fixable failures, create Jira tickets. Summarize all actions taken as a threaded reply in the health report thread.
+This section covers automated PR fixes for pattern-matched failures and shepherding of existing `[ci-fix]` PRs.
 
-## Procedure
-
-### 1. Read handoff artifact
-
-Read the YAML handoff artifact from the bot's fork of `openshift-online/rosa-e2e`:
-
-1. **Resolve the fork path first** — call `priv_scm_ensure_fork("github.com", "openshift-online/rosa-e2e")`. Extract the `fork_repo` value from the response (e.g. `redhat-chai-bot/openshift-online_rosa-e2e`). The fork path is NOT predictable — you must resolve it dynamically every run.
-2. Read the artifact using `github_file_content(repo=<fork_repo>, path=".chai-bot/reports/daily_health_latest.yaml")`. Do NOT guess or hardcode the fork path.
-3. Parse the YAML to extract:
-   - `thread_reference` (channel_id, thread_ts) — for posting threaded replies
-   - `report_date` — verify it's today's date. If stale (not today), log a warning and call `no_action_required()`.
-   - `categories` with per-job failure data, team metadata, and labels
-
-If the artifact is missing or unreadable, report the error **including the fork path you checked** so the failure is diagnosable, and call `no_action_required()`.
-
-**Schema validation:** After parsing, validate the artifact has all required fields before taking any action. Required: `thread_reference` (with `channel_id` and `thread_ts`), `report_date`, `categories` (non-empty list). For each job entry, require: `prow_job`, `pass_count`, `fail_count`, `consecutive_failures` (must be numeric). Additionally, validate that `thread_ts` is a valid Slack timestamp — it must match the numeric format `NNNNNNNNNN.NNNNNN` (e.g. `1785250120.462169`), not placeholder values like `pending`. A `thread_ts` that is missing, empty, set to `pending`, or otherwise non-numeric is treated as **invalid** (but does NOT fail the entire run — see step 2 for the fallback). Also validate that `channel_id` is present and equals `C0ADGRNAT8U`. A missing or unexpected `channel_id` is treated the same as an invalid `thread_ts` — use the fallback path in step 2 rather than failing the run. If other required fields are malformed, partially populated, or missing, treat the artifact the same as missing — report the error and call `no_action_required()`.
-
-### 2. Connect to health report thread
-
-All output from this task must be posted as threaded replies to the original health report message — **but only if both `thread_ts` and `channel_id` are valid**.
-
-**If `thread_ts` is valid** (numeric Slack timestamp format) **and `channel_id` is `C0ADGRNAT8U`**, use the `thread_reference` from the artifact:
-
-```
----REPLY_TO_THREAD:{channel_id}:{thread_ts}---
-```
-
-Place this directive at the very start of your response content (before any text), then compose all threaded replies using `---THREAD_BREAK---` separators.
-
-**If `thread_ts` is invalid** (`pending`, empty, missing, or not matching the numeric `NNNNNNNNNN.NNNNNN` format) **or `channel_id` is missing/unexpected**, do NOT emit the `---REPLY_TO_THREAD:...---` directive — it will silently fail and all output will be lost. Instead:
-
-1. Skip the `---REPLY_TO_THREAD:...---` directive entirely.
-2. Post the remediation summary as a **new top-level message** in channel `C0ADGRNAT8U` (the ROSA CI channel).
-3. Prefix the message with a warning so it is clear why the output is not threaded:
-   `:warning: *Remediation output (unthreaded)* — the health report's thread reference was invalid (`thread_ts={actual_thread_ts_value}`, `channel_id={actual_channel_id_value}`), so this remediation summary could not be posted as a threaded reply. Investigate why the health report failed to update its thread_ts or produced an unexpected channel_id.`
-4. Continue with all remaining remediation steps (auto-fix PRs, shepherding, Jira tickets) normally — the only difference is that output appears as a top-level message instead of a threaded reply.
-
-### 3. Auto-fix PRs (for pattern-matched failures)
+### Auto-fix PRs (for pattern-matched failures)
 
 Scan the artifact for failures that match fixable patterns. Prioritize by severity (lowest pass rate first, highest consecutive failures first).
 
@@ -51,7 +16,7 @@ Scan the artifact for failures that match fixable patterns. Prioritize by severi
 
 If a conformance test (HCP or Classic STS) is failing persistently (3+ consecutive failures) and the failing test is in an OCP-owned sig (sig-apps, sig-auth, sig-network, sig-storage), AND the same test is NOT failing in rosa-e2e HCP/STS jobs (confirming it's upstream, not ROSA-specific):
 
-1. Search for existing open PRs in `openshift/release` with `[ci-fix]` in the title targeting the same test. If found, skip and note the existing PR — it will be shepherded in step 4.
+1. Search for existing open PRs in `openshift/release` with `[ci-fix]` in the title targeting the same test. If found, skip and note the existing PR — it will be shepherded in the next sub-step.
 2. Clone `openshift/release` via workspace tools
 3. Add the test name to the `TEST_SKIPS` env var in the appropriate workflow YAML:
    - HCP: `ci-operator/step-registry/rosa/aws/hcp/conformance/rosa-aws-hcp-conformance-workflow.yaml`
@@ -73,7 +38,7 @@ If a conformance test (HCP or Classic STS) is failing persistently (3+ consecuti
 - Never modify production configs (app-interface, managed-cluster-config)
 - PRs require human `/lgtm` and `/approve` before merge (no auto-merge)
 
-### 4. PR shepherding
+### PR shepherding
 
 After handling new auto-fixes, shepherd open `[ci-fix]` PRs — both newly created and previously opened ones. Search for open PRs with `[ci-fix]` in the title across the allowed repos. Process at most **10 PRs per run** (prioritize newly created PRs first, then oldest existing PRs). If more than 10 open `[ci-fix]` PRs exist, note the overflow count in the summary reply.
 
@@ -107,9 +72,33 @@ Before shepherding, check for any open `[ci-fix]` PRs older than 7 days. Only au
 
 The goal is that by the time a human looks at the PR, the only action needed is `/lgtm` and `/approve`.
 
-### 5. Jira ticket creation (for non-fixable failures)
+### PR Remediation summary
 
-For persistent failures (3+ consecutive) where step 3 did not open a PR (the failure requires deeper investigation or a fix outside the allowed repos), create a Jira ticket so the owning team can investigate.
+After completing auto-fix PRs and PR shepherding, compose a summary of all PR actions taken:
+
+```
+:wrench: *PR Remediation summary — {DATE}*
+
+*Auto-fix PRs:*
+- Opened: {N} new PRs ({list with links})
+- Shepherded: {N} existing PRs ({status of each})
+- Closed stale: {N} PRs
+
+*CodeRabbitAI:*
+- Addressed: {N} comments across {M} PRs
+```
+
+Post this summary using `send_response()`. If no PR actions were taken (no fixable failures, no open PRs to shepherd), skip the summary but still schedule the Jira follow-up if there are persistent failures that may need tickets.
+
+---
+
+## Jira Remediation
+
+This section covers Jira ticket creation for persistent non-fixable failures.
+
+### Jira ticket creation (for non-fixable failures)
+
+For persistent failures (3+ consecutive) where auto-fix PRs were not opened (the failure requires deeper investigation or a fix outside the allowed repos), create a Jira ticket so the owning team can investigate.
 
 Before creating a ticket, search Jira for existing open issues that already cover the same failure (search by job name or test name in ROSAENG and SREP projects). If found, skip and note the existing ticket.
 
@@ -151,33 +140,28 @@ For OCM FVT failures, also check cs-telemetry data (from the artifact's failure 
 - Only create tickets for persistent failures (3+ consecutive), not intermittent flakes
 - Always search for existing open tickets first to avoid duplicates
 
-### 6. Compose summary reply
+### Jira Remediation summary
 
-After completing steps 3-5, compose a single threaded reply summarizing all actions taken. This is posted to the health report thread.
+After completing Jira ticket creation, compose a summary of all Jira actions taken:
 
-Format:
 ```
-:wrench: *Remediation summary — {DATE}*
-
-*Auto-fix PRs:*
-- Opened: {N} new PRs ({list with links})
-- Shepherded: {N} existing PRs ({status of each})
-- Closed stale: {N} PRs
+:ticket: *Jira Remediation summary — {DATE}*
 
 *Jira tickets:*
 - Created: {N} tickets ({list with links})
 - Skipped: {N} (existing tickets found)
-
-*CodeRabbitAI:*
-- Addressed: {N} comments across {M} PRs
 ```
 
-If no actions were taken (all categories green, no open PRs to shepherd, no persistent failures), call `no_action_required()` instead.
+Post this summary using `send_response()`. If no Jira actions were taken (no persistent failures needing tickets, or existing tickets already cover all failures), call `no_action_required()` instead.
+
+---
 
 ## Constraints
 
-- All output is posted as threaded replies to the health report thread when both `thread_ts` and `channel_id` are valid. When either is invalid (e.g. `thread_ts` is `pending`, or `channel_id` is missing or not `C0ADGRNAT8U`), output falls back to a top-level message in `C0ADGRNAT8U` with a warning — never silently discard output.
 - Maximum 5 auto-fix PRs and 4 Jira tickets per run.
 - Never modify production configs (`app-interface`, `managed-cluster-config`).
 - PRs require human `/lgtm` and `/approve` before merge.
-- If the handoff artifact is missing or stale (not today), call `no_action_required()`.
+- If the handoff artifact is missing or stale (not today's date), call `no_action_required()`.
+- Each follow-up gets its own token budget (fresh context). Re-read the artifact and these instructions from the repo at the start of each follow-up.
+- Only ONE pending follow-up per thread at a time. The PR remediation follow-up schedules the Jira follow-up; do not schedule both from the same turn.
+- `send_response()` ends the turn immediately — no tool calls after it except `schedule_followup`.
