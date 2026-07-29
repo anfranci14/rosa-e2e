@@ -4,7 +4,7 @@ You are running a **cron** scheduled task that produces a daily CI health report
 
 ## Goal
 
-Check the pass/fail history (last completed builds over 7 days per job) for all ROSA CI periodic jobs across all categories defined in the job registry. Report per-category pass rates, 7-day trends, and failure classifications. If all categories are >= 80%, respond with a brief summary and `no_action_required()`. After reporting, write a YAML handoff artifact to the bot's fork for the remediation task.
+Check the pass/fail history (last completed builds over 7 days per job) for all ROSA CI periodic jobs across all categories defined in the job registry. Report per-category pass rates, 7-day trends, and failure classifications. If all categories are >= 80%, respond with a brief summary and `no_action_required()`. After reporting, write a YAML handoff artifact to the bot's fork. When failures are present (any category < 80%), chain remediation follow-ups in the same thread; on all-green reports, the artifact is written but no remediation follow-up is scheduled.
 
 ## Procedure
 
@@ -55,7 +55,7 @@ Post a concise summary as your channel response. This is the top-level message t
 
 **If all categories >= 80%**: respond with a single line like:
 `:large_green_circle: *ROSA CI Daily Health -- {DATE}:* all {N} categories passing (overall {rate}%)`
-Proceed to step 6 (write handoff artifact), then step 7 (deliver response and schedule thread_ts update).
+Proceed to step 6 (write handoff artifact), then step 7 (deliver response).
 
 **If any category < 80%**: use this format:
 
@@ -78,7 +78,7 @@ _{N} categories skipped (no runs) · <https://sippy.dptools.openshift.org/sippy-
 - Append a small `(<prow_filter_url|jobs>)` link at the end of each category line using the `prow_filter` URL from ci-status-jobs.yaml. This lets readers click through to the Prow job-history for that category.
 - Do NOT repeat category details in a separate section below the list.
 
-**Threading gate:** Before proceeding, check: does your summary contain any :red_circle: or :large_yellow_circle: categories? If yes, step 5 is **mandatory** — do not call `send_response()` until threaded replies are composed. If all categories are :large_green_circle:, skip step 5 and proceed directly to step 6.
+**Threading gate:** Before proceeding, check: does your summary contain any :red_circle: or :large_yellow_circle: categories? If yes, step 5 is **mandatory** — do not call `send_response()` until threaded replies are composed. If all categories are :large_green_circle:, skip step 5 and proceed directly to step 6 (write handoff artifact).
 
 ### 5. Failure analysis (threaded replies)
 
@@ -139,25 +139,22 @@ These are patterns that come up often. Use them as hints, not a rigid checklist.
 
 ### 6. Write handoff artifact
 
-**Before** calling `send_response()`, write a YAML handoff artifact for the remediation task. This step runs even if all categories are green (the remediation task uses the artifact for PR shepherding of previously opened PRs).
+**Before** calling `send_response()`, write a YAML handoff artifact for the remediation follow-ups. This step runs even if all categories are green (the remediation follow-up uses the artifact for PR shepherding of previously opened PRs).
 
 **Artifact location:** Push to the bot's fork of `openshift-online/rosa-e2e` at path `.chai-bot/reports/daily_health_latest.yaml`.
 
 **Steps:**
-1. Call `priv_scm_ensure_fork("github.com", "openshift-online/rosa-e2e")` to ensure the bot's fork exists and get the fork repo path.
-2. Set `thread_reference.thread_ts` to `"pending"` — the actual thread_ts is not available until after `send_response()` creates the top-level message. It will be updated in step 7.
-3. Compose the YAML artifact (schema below).
-4. Use a workspace to clone the fork, write the file, commit, and push to the fork's default branch.
-5. Verify the push succeeded. If cloning, committing, or pushing fails, include a warning in the top-level response delivered by step 7: ":warning: Handoff artifact write failed — remediation task will not run today." Do NOT call `no_action_required()` without a successful push — the artifact is required for the remediation task.
+1. Call `priv_scm_ensure_fork("github.com", "openshift-online/rosa-e2e")` to ensure the bot's fork exists and get the fork repo path. Store the fork repo path — you will need it in step 7 for the follow-up description.
+2. Compose the YAML artifact (schema below).
+3. Use a workspace to clone the fork, write the file, commit, and push to the fork's default branch.
+4. Verify the push succeeded. If cloning, committing, or pushing fails, include a warning in the top-level response delivered by step 7: ":warning: Handoff artifact write failed — remediation will not run today." Do NOT call `no_action_required()` without a successful push — the artifact is required for the remediation follow-ups.
+5. After a successful push, capture the commit SHA (e.g., from `git rev-parse HEAD`). Store the SHA — it will be embedded in the follow-up description so the remediation reads the artifact at this exact commit, avoiding race conditions if a concurrent run overwrites `daily_health_latest.yaml` during the follow-up delay.
 
 **YAML schema:**
 
 ```yaml
 report_date: "2026-07-25"
 generated_at: "2026-07-25T14:45:00Z"
-thread_reference:
-  channel_id: "C0ADGRNAT8U"
-  thread_ts: "1784990442.709069"
 overall_pass_rate: 66
 job_registry_url: "https://raw.githubusercontent.com/openshift-online/rosa-e2e/main/configs/ci-status-jobs.yaml"
 categories:
@@ -192,25 +189,34 @@ categories:
 ```
 
 **Field notes:**
-- `thread_reference`: channel_id is always `C0ADGRNAT8U`. thread_ts is initially `pending` and updated ~2 minutes after the health report posts via a scheduled follow-up. The remediation task uses this to post threaded replies to the same thread.
-- Include **ALL** categories and **ALL** jobs, not just failing ones. The remediation task needs the full picture.
+- Include **ALL** categories and **ALL** jobs, not just failing ones. The remediation follow-ups need the full picture.
 - `consecutive_failures`: count of consecutive recent failed builds (0 if the latest passed).
 - `failure_classification`: short label from your analysis (e.g., "conformance skip list", "STS account-roles crash", "Boskos lease timeout"). Empty string if the job is passing.
-- `failing_tests`: list of specific test names or step names that are failing. Empty list if the job is passing. The remediation task uses these to create skip-list PRs and accurate Jira ticket descriptions.
+- `failing_tests`: list of specific test names or step names that are failing. Empty list if the job is passing. The remediation follow-up uses these to create skip-list PRs and accurate Jira ticket descriptions.
 - `failure_summary`: one-line human-readable summary of the failure diagnosis from step 5. Empty string if the job is passing.
 - `diagnosis`: structured diagnostic evidence including error messages, cs-telemetry findings, or log excerpts. Empty string if the job is passing.
 - `team` and `labels`: from the job registry (`ci-status-jobs.yaml`). Include them verbatim. If a job overrides the category-level team/labels, use the job-level values.
-- If a job had a fetch error in step 2, set `pass_count` and `fail_count` to -1 and `failure_classification` to "fetch_error".
+- If a job had a fetch error in step 2, set `pass_count` and `fail_count` to -1, `total` to 0, `pass_rate` to -1, `consecutive_failures` to 0, and `failure_classification` to "fetch_error". This signals that no valid data was retrieved — remediation follow-ups must skip these jobs entirely (they are not real failures).
 
-### 7. Deliver response and update thread reference
+### 7. Deliver response and schedule remediation follow-up
 
-1. Call `schedule_followup` with a 2-minute delay and this description:
+1. Call `send_response()` to deliver the summary (and threaded replies if applicable). **`send_response()` ends your current turn — no tool calls after it.**
 
-   > Update the handoff artifact thread_ts. Call `get_current_thread_url()` to get the real thread_ts. Then use a workspace to clone the fork at `<fork_repo>`, update `.chai-bot/reports/daily_health_latest.yaml` — replace `thread_ts: 'pending'` with the actual thread_ts value. Commit and push. If the artifact doesn't exist or thread_ts is already set, call `no_action_required()`.
+2. **After `send_response()`**, call `schedule_followup` with a 2-minute delay. The follow-up fires **in the same thread** as the health report, so threading is automatic — no thread_ts or channel_id needed.
 
-   Replace `<fork_repo>` in the description with the actual fork repo path from step 6.1.
+   **All-green path** (every category >= 80%): Write the handoff artifact (step 6) and call `send_response()`. Do **not** schedule a remediation follow-up — there is nothing to remediate. The artifact is still written so PR shepherding can happen if triggered manually.
 
-2. Call `send_response()` to deliver the summary (and threaded replies if applicable). **This must be the last operation — it ends your current turn.** The scheduled follow-up will fire ~2 minutes later and update the artifact with the real thread_ts.
+   **Failures present** (any category < 80%): After `send_response()`, schedule the follow-up with this description (replace `<fork_repo>` with the actual fork repo path from step 6.1 and `<commit_sha>` with the commit SHA from step 6.5):
+
+   > PR Remediation follow-up. You are continuing the daily health report thread with automated remediation.
+   >
+   > 1. Call `priv_scm_ensure_fork("github.com", "openshift-online/rosa-e2e")` to resolve the fork path.
+   > 2. Read the handoff artifact using `github_file_content(repo="<fork_repo>", path=".chai-bot/reports/daily_health_latest.yaml", ref="<commit_sha>")`. Parse the YAML. Verify `report_date` is today — if stale, call `no_action_required()`.
+   > 3. Read the remediation instructions using `github_file_content(repo="openshift-online/rosa-e2e", path=".chai-bot/rosa_ci_daily_remediation.md")`. Follow the **"## PR Remediation"** section (auto-fix PRs and PR shepherding).
+   > 4. **Action branch** (PRs were opened, shepherded, or closed): Compose a summary of all PR actions taken and post it using `send_response()`. After `send_response()`, call `schedule_followup` with a 2-minute delay for Jira remediation (use the description in step 6).
+   > 5. **No-action branch** (no fixable failures, no open PRs to shepherd): Schedule the Jira follow-up directly (persistent failures may still need tickets even if no PRs are warranted), then call `no_action_required()`. Do NOT post an empty summary via `send_response()`.
+   > 6. Jira follow-up description (used by both branches):
+   >    "Jira Remediation follow-up. You are continuing the daily health report thread with Jira ticket creation for persistent failures. (1) Call priv_scm_ensure_fork to resolve the fork. (2) Read the handoff artifact from <fork_repo> at .chai-bot/reports/daily_health_latest.yaml using ref=<commit_sha>. Verify report_date is today. (3) Read the remediation instructions from openshift-online/rosa-e2e at .chai-bot/rosa_ci_daily_remediation.md. Follow the '## Jira Remediation' section. (4) Compose a summary of Jira actions taken and post it using send_response(). If no Jira actions are needed, call no_action_required()."
 
 ## Constraints
 
@@ -218,5 +224,8 @@ categories:
 - Never add sections, headers, or bullet lists below the category lines. The only thing after the last category line is the footer.
 - If more than half the jobs return no data, warn about possible Prow/GCS issues at the top.
 - Before sending: if any category is below 80%, verify your response content contains `---THREAD_DETAILS---` followed by at least one threaded reply section. If these delimiters are missing, your threaded replies will not be posted — go back to step 5.
-- Always write the handoff artifact (step 6) before posting, even if all categories are green. Step 7 delivers the response and schedules the thread_ts update.
+- Always write the handoff artifact (step 6) before calling `send_response()`, even if all categories are green.
+- Only ONE pending follow-up per thread at a time. Do not schedule multiple follow-ups from the same turn.
+- `send_response()` ends the turn immediately — no tool calls after it except `schedule_followup`.
+- On the all-green path (all categories >= 80%), do NOT schedule a remediation follow-up.
 
